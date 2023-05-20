@@ -1,0 +1,18 @@
+torchrun --nnodes=1 --nproc_per_node=4 train.py \
+--run_name flamingo3B \
+--lm_path facebook/opt-1.3b \
+--tokenizer_path facebook/opt-1.3b \
+--dataset_resampled \
+--laion_shards "/path/to/shards/shard-{0000..0999}.tar" \
+--mmc4_shards "/path/to/shards/shard-{0000..0999}.tar" \
+--batch_size_mmc4 4 \
+--batch_size_laion 8 \
+--train_num_samples_mmc4 125000 \
+--train_num_samples_laion 250000 \
+--loss_multiplier_laion 0.2 \
+--workers=6 \
+--num_epochs 250 \
+--lr_scheduler constant \
+--warmup_steps 5000 \
+--use_media_placement_augmentation \
+--mmc4_textsim_threshold 0.32
