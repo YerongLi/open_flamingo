@@ -5,23 +5,27 @@ import os
 import random
 import uuid
 from collections import defaultdict
+from typing import Mapping
 
+from einops import repeat
 import more_itertools
 import numpy as np
 import torch
+
 from coco_metric import compute_cider, postprocess_captioning_generation
-from eval_datasets import CaptionDataset, VQADataset, ImageNetDataset
+from eval_datasets import CaptionDataset, ImageNetDataset, ClassificationDataset
 from tqdm import tqdm
 
-from ok_vqa_utils import postprocess_ok_vqa_generation
-from vqa_metric import compute_vqa_accuracy, postprocess_vqa_generation
-from open_flamingo.src.flamingo import Flamingo
-from imagenet_utils import (
-    openai_imagenet_classnames,
+from eval_datasets import VQADataset, ImageNetDataset
+from open_flamingo.eval.imagenet_utils import (
     IMAGENET_1K_CLASS_ID_TO_LABEL,
-    find_sub_list,
 )
-from open_flamingo.eval import eval_model
+
+from eval_model import BaseEvalModel
+
+from open_flamingo.eval.ok_vqa_utils import postprocess_ok_vqa_generation
+from open_flamingo.src.flamingo import Flamingo
+from vqa_metric import compute_vqa_accuracy, postprocess_vqa_generation
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -69,6 +73,18 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Whether to evaluate on OK-VQA.",
+)
+parser.add_argument(
+    "--eval_vizwiz",
+    action="store_true",
+    default=False,
+    help="Whether to evaluate on VizWiz.",
+)
+parser.add_argument(
+    "--eval_textvqa",
+    action="store_true",
+    default=False,
+    help="Whether to evaluate on TextVQA.",
 )
 parser.add_argument(
     "--eval_imagenet",
@@ -196,6 +212,76 @@ parser.add_argument(
     default=None,
 )
 
+## VizWiz Dataset
+parser.add_argument(
+    "--vizwiz_train_image_dir_path",
+    type=str,
+    help="Path to the vizwiz train images directory.",
+    default=None,
+)
+parser.add_argument(
+    "--vizwiz_test_image_dir_path",
+    type=str,
+    help="Path to the vizwiz test images directory.",
+    default=None,
+)
+parser.add_argument(
+    "--vizwiz_train_questions_json_path",
+    type=str,
+    help="Path to the vizwiz questions json file.",
+    default=None,
+)
+parser.add_argument(
+    "--vizwiz_train_annotations_json_path",
+    type=str,
+    help="Path to the vizwiz annotations json file.",
+    default=None,
+)
+parser.add_argument(
+    "--vizwiz_test_questions_json_path",
+    type=str,
+    help="Path to the vizwiz questions json file.",
+    default=None,
+)
+parser.add_argument(
+    "--vizwiz_test_annotations_json_path",
+    type=str,
+    help="Path to the vizwiz annotations json file.",
+    default=None,
+)
+
+# TextVQA Dataset
+parser.add_argument(
+    "--textvqa_image_dir_path",
+    type=str,
+    help="Path to the textvqa images directory.",
+    default=None,
+)
+parser.add_argument(
+    "--textvqa_train_questions_json_path",
+    type=str,
+    help="Path to the textvqa questions json file.",
+    default=None,
+)
+parser.add_argument(
+    "--textvqa_train_annotations_json_path",
+    type=str,
+    help="Path to the textvqa annotations json file.",
+    default=None,
+)
+parser.add_argument(
+    "--textvqa_test_questions_json_path",
+    type=str,
+    help="Path to the textvqa questions json file.",
+    default=None,
+)
+parser.add_argument(
+    "--textvqa_test_annotations_json_path",
+    type=str,
+    help="Path to the textvqa annotations json file.",
+    default=None,
+)
+
 ## Imagenet dataset
 parser.add_argument("--imagenet_root", type=str, default="/tmp")
 
@@ -210,7 +296,14 @@ parser.add_argument(
 def main():
     args, leftovers = parser.parse_known_args()
     module = importlib.import_module(f"open_flamingo.eval.models.{args.model}")
-    eval_model = module.EvalModel(leftovers)
+
+    model_args = {
+        leftovers[i].lstrip("-"): leftovers[i + 1] for i in range(0, len(leftovers), 2)
+    }
+    eval_model = module.EvalModel(model_args)
+
+    if args.model != "open_flamingo" and args.shots != [0]:
+        raise ValueError("Only 0 shot eval is supported for non-open_flamingo models")
 
     if len(args.trial_seeds) != args.num_trials:
         raise ValueError("Number of trial seeds must be == number of trials.")
@@ -293,18 +386,68 @@ def main():
                 {"shots": shot, "trials": scores, "mean": np.mean(scores)}
             )
 
+    if args.eval_vizwiz:
+        print("Evaluating on VizWiz...")
+        for shot in args.shots:
+            scores = []
+            for seed, trial in zip(args.trial_seeds, range(args.num_trials)):
+                vizwiz_score = evaluate_vqa(
+                    args=args,
+                    eval_model=eval_model,
+                    num_shots=shot,
+                    seed=seed,
+                    dataset_name="vizwiz",
+                )
+                print(f"Shots {shot} Trial {trial} VizWiz score: {vizwiz_score}")
+                scores.append(vizwiz_score)
+            print(f"Shots {shot} Mean VizWiz score: {np.mean(scores)}")
+            results["vizwiz"].append(
+                {"shots": shot, "trials": scores, "mean": np.mean(scores)}
+            )
+
+    if args.eval_textvqa:
+        print("Evaluating on TextVQA...")
+        for shot in args.shots:
+            scores = []
+            for seed, trial in zip(args.trial_seeds, range(args.num_trials)):
+                textvqa_score = evaluate_vqa(
+                    args=args,
+                    eval_model=eval_model,
+                    num_shots=shot,
+                    seed=seed,
+                    dataset_name="textvqa",
+                )
+                print(f"Shots {shot} Trial {trial} TextVQA score: {textvqa_score}")
+                scores.append(textvqa_score)
+            print(f"Shots {shot} Mean TextVQA score: {np.mean(scores)}")
+            results["textvqa"].append(
+                {"shots": shot, "trials": scores, "mean": np.mean(scores)}
+            )
+
     if args.eval_imagenet:
         print("Evaluating on ImageNet...")
         for shot in args.shots:
             scores = []
             for seed, trial in zip(args.trial_seeds, range(args.num_trials)):
-                imagenet_score = evaluate_imagenet(
+                imagenet_dataset = ClassificationDataset(
+                    train_dataset=ImageNetDataset(
+                        os.path.join(args.imagenet_root, "train")
+                    ),
+                    val_dataset=ImageNetDataset(
+                        os.path.join(args.imagenet_root, "val")
+                    ),
+                    class_id_to_label=IMAGENET_1K_CLASS_ID_TO_LABEL,
+                    prompts=[
+                        "A photo of a",
+                    ],
+                )
+                imagenet_score = evaluate_classification(
                     eval_model=eval_model,
                     batch_size=args.batch_size,
                     num_samples=args.num_samples,
                     num_shots=shot,
                     seed=seed,
-                    imagenet_root=args.imagenet_root,
+                    classification_dataset=imagenet_dataset,
                 )
                 print(
                     f"Shots {shot} Trial {trial} " f"ImageNet score: {imagenet_score}"
@@ -323,7 +466,7 @@ def main():
 def get_random_indices(num_samples, query_set_size, full_dataset, seed):
     if num_samples + query_set_size > len(full_dataset):
         raise ValueError(
-            f"num_samples + num_shots must be less than {len(full_dataset)}"
+            f"num_samples + query_set_size must be less than {len(full_dataset)}"
         )
 
     # get a random subset of the dataset
@@ -350,9 +493,15 @@ def sample_batch_demos_from_query_set(query_set, num_samples, batch_size):
     return [random.sample(query_set, num_samples) for _ in range(batch_size)]
 
 
+def compute_effective_num_shots(num_shots, model_type):
+    if model_type == "open_flamingo":
+        return num_shots if num_shots > 0 else 2
+    return num_shots
+
+
 def evaluate_captioning(
     args: argparse.Namespace,
-    eval_model: eval_model.BaseEvalModel,
+    eval_model: BaseEvalModel,
     seed: int = 42,
     max_generation_length: int = 20,
     num_beams: int = 3,
@@ -364,7 +513,7 @@ def evaluate_captioning(
 
     Args:
         args (argparse.Namespace): arguments
-        eval_model (eval_model.BaseEvalModel): model to evaluate
+        eval_model (BaseEvalModel): model to evaluate
         seed (int, optional): seed for random number generator. Defaults to 42.
         max_generation_length (int, optional): maximum length of the generated caption. Defaults to 20.
         num_beams (int, optional): number of beams to use for beam search. Defaults to 3.
@@ -405,7 +554,7 @@ def evaluate_captioning(
         dataset_name=dataset_name,
     )
 
-    effective_num_shots = num_shots if num_shots > 0 else 2
+    effective_num_shots = compute_effective_num_shots(num_shots, args.model)
 
     test_dataset = prepare_eval_samples(
         test_dataset,
@@ -436,7 +585,7 @@ def evaluate_captioning(
 
             context_text = "".join(
                 [
-                    eval_model.caption_prompt(caption=x["caption"].strip())
+                    eval_model.get_caption_prompt(caption=x["caption"].strip())
                     for x in batch_demo_samples[i]
                 ]
             )
@@ -445,7 +594,7 @@ def evaluate_captioning(
             if num_shots == 0:
                 context_text = context_text.replace("<image>", "")
 
-            batch_text.append(context_text + eval_model.caption_prompt())
+            batch_text.append(context_text + eval_model.get_caption_prompt())
 
         outputs = eval_model.get_outputs(
             batch_images=batch_images,
@@ -493,7 +642,7 @@ def evaluate_captioning(
 
 def evaluate_vqa(
     args: argparse.Namespace,
-    eval_model: eval_model.BaseEvalModel,
+    eval_model: BaseEvalModel,
     seed: int = 42,
     max_generation_length: int = 5,
     num_beams: int = 3,
@@ -502,11 +651,11 @@ def evaluate_vqa(
     dataset_name: str = "vqav2",
 ):
     """
-    Evaluate a model on VQA datasets. Currently supports VQA v2.0.
+    Evaluate a model on VQA datasets. Currently supports VQA v2.0, OK-VQA, VizWiz and TextVQA.
 
     Args:
         args (argparse.Namespace): arguments
-        eval_model (eval_model.BaseEvalModel): model to evaluate
+        eval_model (BaseEvalModel): model to evaluate
         seed (int, optional): random seed. Defaults to 42.
         max_generation_length (int, optional): max generation length. Defaults to 5.
         num_beams (int, optional): number of beams to use for beam search. Defaults to 3.
@@ -531,6 +680,20 @@ def evaluate_vqa(
         test_image_dir_path = args.vqav2_test_image_dir_path
         test_questions_json_path = args.vqav2_test_questions_json_path
         test_annotations_json_path = args.vqav2_test_annotations_json_path
+    elif dataset_name == "vizwiz":
+        train_image_dir_path = args.vizwiz_train_image_dir_path
+        train_questions_json_path = args.vizwiz_train_questions_json_path
+        train_annotations_json_path = args.vizwiz_train_annotations_json_path
+        test_image_dir_path = args.vizwiz_test_image_dir_path
+        test_questions_json_path = args.vizwiz_test_questions_json_path
+        test_annotations_json_path = args.vizwiz_test_annotations_json_path
+    elif dataset_name == "textvqa":
+        train_image_dir_path = args.textvqa_image_dir_path
+        train_questions_json_path = args.textvqa_train_questions_json_path
+        train_annotations_json_path = args.textvqa_train_annotations_json_path
+        test_image_dir_path = args.textvqa_image_dir_path
+        test_questions_json_path = args.textvqa_test_questions_json_path
+        test_annotations_json_path = args.textvqa_test_annotations_json_path
     else:
         raise ValueError(f"Unsupported dataset: {dataset_name}")
 
@@ -539,6 +702,7 @@ def evaluate_vqa(
         question_path=train_questions_json_path,
         annotations_path=train_annotations_json_path,
         is_train=True,
+        dataset_name=dataset_name,
     )
 
     test_dataset = VQADataset(
@@ -546,9 +710,10 @@ def evaluate_vqa(
         question_path=test_questions_json_path,
         annotations_path=test_annotations_json_path,
         is_train=False,
+        dataset_name=dataset_name,
     )
 
-    effective_num_shots = num_shots if num_shots > 0 else 2
+    effective_num_shots = compute_effective_num_shots(num_shots, args.model)
 
     test_dataset = prepare_eval_samples(
         test_dataset,
@@ -578,7 +743,7 @@ def evaluate_vqa(
 
             context_text = "".join(
                 [
-                    eval_model.vqa_prompt(
+                    eval_model.get_vqa_prompt(
                         question=x["question"], answer=x["answers"][0]
                     )
                     for x in batch_demo_samples[i]
@@ -590,7 +755,7 @@ def evaluate_vqa(
                 context_text = context_text.replace("<image>", "")
 
             batch_text.append(
-                context_text + eval_model.vqa_prompt(question=batch[i]["question"])
+                context_text + eval_model.get_vqa_prompt(question=batch[i]["question"])
             )
 
         outputs = eval_model.get_outputs(
@@ -602,9 +767,9 @@ def evaluate_vqa(
         )
 
         process_function = (
-            postprocess_vqa_generation
-            if dataset_name == "vqav2"
-            else postprocess_ok_vqa_generation
+            postprocess_ok_vqa_generation
+            if dataset_name == "ok_vqa"
+            else postprocess_vqa_generation
         )
 
         new_predictions = map(process_function, outputs)
@@ -622,12 +787,8 @@ def evaluate_vqa(
 
     acc = compute_vqa_accuracy(
         f"{dataset_name}results_{random_uuid}.json",
-        args.ok_vqa_test_questions_json_path
-        if dataset_name == "ok_vqa"
-        else args.vqav2_test_questions_json_path,
-        args.ok_vqa_test_annotations_json_path
-        if dataset_name == "ok_vqa"
-        else args.vqav2_test_annotations_json_path,
+        test_questions_json_path,
+        test_annotations_json_path,
     )
 
     # delete the temporary file
@@ -636,21 +797,20 @@ def evaluate_vqa(
     return acc
 
 
-def evaluate_imagenet(
+def evaluate_classification(
     eval_model,
     batch_size: int,
-    imagenet_root: str,
+    classification_dataset: ClassificationDataset,
     seed: int = 42,
     num_samples: int = 5000,
     num_shots: int = 8,
 ):
     """
-    Evaluate a model on ImageNet dataset.
+    Evaluate a model on a classification dataset.
 
     Args:
-        eval_model (eval_model.BaseEvalModel): model to evaluate
+        eval_model (BaseEvalModel): model to evaluate
         batch_size (int): batch size
-        imagenet_root (str): path to imagenet root for the specified split.
         seed (int, optional): random seed. Defaults to 42.
         num_samples (int, optional): number of samples to evaluate on. Defaults to 5000 samples.
         num_shots (int, optional): number of shots to use. Defaults to 8.
@@ -666,100 +826,158 @@ def evaluate_imagenet(
     model, tokenizer = eval_model.model, eval_model.tokenizer
     assert isinstance(model, Flamingo)
 
-    train_dataset = ImageNetDataset(os.path.join(imagenet_root, "train"))
-    val_dataset = ImageNetDataset(os.path.join(imagenet_root, "val"))
+    train_dataset = classification_dataset.train_dataset
+    val_dataset = classification_dataset.val_dataset
+    class_id_to_label = classification_dataset.class_id_to_label
 
-    effective_num_shots = num_shots if num_shots > 0 else 2
+    effective_num_shots = compute_effective_num_shots(num_shots, args.model)
     tokenizer.padding_side = (
         "left"  # For generation padding tokens should be on the left
     )
 
-    acc1 = 0
-    acc5 = 0
-    prompt_text = "<image>A photo of a"
+    _metrics = defaultdict(
+        float
+    )  # accumulates metric values over each batch, to be averaged at end.
+    # TODO(jpgard): iterate over prompts here.
+    prompt_text = f"<image>{classification_dataset.prompts[0]}"
 
-    for i, batch in enumerate(val_dataset):
-        # Choose a different set of random context samples for each batch
-        # from the training set
-        context_indices = np.random.choice(
-            len(train_dataset), effective_num_shots, replace=False
-        )
+    val_iterator = more_itertools.chunked(val_dataset, batch_size)
+    for batch_idx, batch in enumerate(val_iterator):
+        batch_images = []
+        batch_text = []
 
-        in_context_samples = [train_dataset[i] for i in context_indices]
+        for idx in range(len(batch)):
+            # Choose a different set of random context samples for each sample
+            # from the training set
+            context_indices = classification_dataset.get_in_context_samples(
+                effective_num_shots
+            )
 
-        vision_x = [
-            eval_model.image_processor(data["image"]).unsqueeze(0)
-            for data in in_context_samples
-        ] + [eval_model.image_processor(batch["image"]).unsqueeze(0)]
-        vision_x = torch.cat(vision_x, dim=0)
-        vision_x = vision_x.unsqueeze(1).unsqueeze(0)
+            in_context_samples = [train_dataset[i] for i in context_indices]
+
+            vision_x = [
+                eval_model.image_processor(data["image"]).unsqueeze(0)
+                for data in in_context_samples
+            ] + [eval_model.image_processor(batch[idx]["image"]).unsqueeze(0)]
+            batch_images.append(torch.cat(vision_x, dim=0))
+
+            context_class_names = [
+                in_context_samples[i]["class_name"] for i in range(effective_num_shots)
+            ]
+            context_text = "".join(
+                f"{prompt_text} {classname}<|endofchunk|>"
+                for classname in context_class_names
+            )
+            batch_text.append(context_text)
+
+        # shape [B, T_img, C, h, w]
+        vision_x = torch.stack(batch_images, dim=0)
+        # shape [B, T_img, 1, C, h, w] where 1 is the frame dimension
+        vision_x = vision_x.unsqueeze(2)
         model._encode_vision_x(vision_x.cuda())
 
-        context_class_names = [
-            in_context_samples[i]["class_name"] for i in range(effective_num_shots)
-        ]
-        context_text = "".join(
-            f"{prompt_text} {classname}<|endofchunk|>"
-            for classname in context_class_names
+        # Cache the context text: tokenize context and prompt,
+        # e.g. '<context> a picture of a '
+        ctx_and_prompt_tokenized = tokenizer(
+            [context_text + prompt_text + " " for context_text in batch_text],
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048,
         )
 
-        # TODO(jpgard): cache the context text here, and compute the outputs
-        #  one token at a time by using Flamingo.forward() with
-        #  past_key_values and use_cache parameters.
-
-        overall_probs = []
-        for imagenet_class_name in tqdm(openai_imagenet_classnames):
-            target_text = f"{prompt_text} {imagenet_class_name}"
-            prompt_tokens = (
-                tokenizer(prompt_text, add_special_tokens=False, return_tensors="np")[
-                    "input_ids"
-                ]
-                .ravel()
-                .tolist()
-            )
-
-            lang_x = tokenizer([context_text + target_text], return_tensors="pt")
-
-            outputs = model(
+        with torch.no_grad():
+            precomputed = model(
                 vision_x=None,
-                lang_x=lang_x["input_ids"].cuda(),
-                attention_mask=lang_x["attention_mask"].cuda(),
+                lang_x=ctx_and_prompt_tokenized["input_ids"].cuda(),
+                attention_mask=ctx_and_prompt_tokenized["attention_mask"].cuda(),
                 clear_conditioned_layers=False,
                 use_cached_vision_x=True,
+                use_cache=True,
             )
-            probs = torch.softmax(outputs.logits, dim=-1).detach()
+
+        def _detach_pkvs(pkvs):
+            """Detach a set of past key values."""
+            return tuple([tuple([x.detach() for x in inner]) for inner in pkvs])
+
+        precomputed_pkvs = _detach_pkvs(precomputed.past_key_values)
+
+        precomputed_logits = precomputed.logits.detach()
+
+        overall_probs = []
+        for class_name in tqdm(class_id_to_label.values()):
+            past_key_values = None
+            # Tokenize only the class name and iteratively decode the model's
+            # predictions for this class.
+            classname_tokens = tokenizer(
+                class_name, add_special_tokens=False, return_tensors="pt"
+            )["input_ids"].cuda()
+
+            if classname_tokens.ndim == 1:  # Case: classname is only 1 token
+                classname_tokens = torch.unsqueeze(classname_tokens, 1)
+
+            classname_tokens = repeat(
+                classname_tokens, "b s -> (repeat b) s", repeat=batch_size
+            )
+
+            # Compute the outputs one token at a time, using cached
+            # activations.
+
+            # Initialize the elementwise predictions with the last set of
+            # logits from precomputed; this will correspond to the predicted
+            # probability of the first position/token in the imagenet
+            # classname. We will append the logits for each token to this
+            # list (each element has shape [B, 1, vocab_size]).
+            elementwise_logits = [precomputed_logits[:, -2:-1, :]]
+
+            for token_idx in range(classname_tokens.shape[1]):
+                _lang_x = classname_tokens[:, token_idx].reshape((-1, 1))
+                with torch.no_grad():
+                    outputs = model(
+                        vision_x=None,
+                        lang_x=_lang_x,
+                        clear_conditioned_layers=False,
+                        use_cached_vision_x=True,
+                        past_key_values=(
+                            past_key_values if token_idx > 0 else precomputed_pkvs
+                        ),
+                        use_cache=True,
+                    )
+                past_key_values = _detach_pkvs(outputs.past_key_values)
+                elementwise_logits.append(outputs.logits.detach())
+
+            # logits/probs has shape [B, classname_tokens + 1, vocab_size]
+            logits = torch.concat(elementwise_logits, 1)
+            probs = torch.softmax(logits, dim=-1).detach()
+
             # collect the probability of the generated token -- probability
-            # at index 0 corresponds to the token at index 1
-            probs = probs[:, :-1, :]
-            input_ids = lang_x["input_ids"][:, 1:].cuda()
-            gen_probs = torch.gather(probs, 2, input_ids[:, :, None]).squeeze(-1)
+            # at index 0 corresponds to the token at index 1.
+            probs = probs[:, :-1, :]  # shape [B, classname_tokens, vocab_size]
 
-            probs = []
-            for input_sentence, input_probs in zip(input_ids, gen_probs):
-                idxes = find_sub_list(
-                    prompt_tokens, input_sentence.detach().cpu().numpy().tolist()
-                )
-                input_probs = input_probs[idxes[-1] + 1 :]
-                probs.append(torch.prod(input_probs).item())
-            overall_probs.append(probs)
+            gen_probs = torch.gather(probs, 2, classname_tokens[:, :, None]).squeeze(-1)
 
-        top5 = [
-            IMAGENET_1K_CLASS_ID_TO_LABEL[pred]
-            for pred in np.argsort(np.array(overall_probs)[:, 0])[::-1][:5]
-        ]
-        if batch["class_name"] == top5[0]:
-            acc1 += 1
-        if batch["class_name"] in top5:
-            acc5 += 1
+            class_prob = torch.prod(gen_probs, 1).detach().cpu().numpy()
+            overall_probs.append(class_prob)
+
+        overall_probs = np.row_stack(overall_probs).T  # shape [B, num_classes]
+
+        targets = [x["class_name"] for x in batch]
+        metrics = classification_dataset.metric_fn(targets, overall_probs)
+
+        for k in metrics.keys():
+            _metrics[k] += metrics[k]
+
+        examples_seen = (batch_idx + 1) * batch_size
         print(
-            "eval {}/{}: acc@1 ({}), acc@5 ({})".format(
-                i, num_samples, acc1 / (i + 1), acc5 / (i + 1)
+            f"eval {examples_seen}/{num_samples}: "
+            + "\n\t".join(
+                [f"{k}: {v / examples_seen:.4f}" for k, v in _metrics.items()]
             )
         )
-        if i >= num_samples - 1:
+        if batch_idx * batch_size >= num_samples - 1:
             break
 
-    return float(acc1) / num_samples
+    return float(_metrics["acc1"]) / num_samples
 
 
 if __name__ == "__main__":
