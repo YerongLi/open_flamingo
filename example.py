@@ -4,8 +4,8 @@ model, image_processor, tokenizer = create_model_and_transforms(
     clip_vision_encoder_path="ViT-L-14",
     clip_vision_encoder_pretrained="openai",
     cache_dir='/scratch/yerong/.cache/',
-    lang_encoder_path="<path to llama weights in HuggingFace format>",
-    tokenizer_path="<path to llama tokenizer in HuggingFace format>",
+    lang_encoder_path="/scratch/yerong/.cache/huggingface/hub/models--decapoda-research--llama-7b-hf/snapshots/5f98eefcc80e437ef68d457ad7bf167c2c6a1348",
+    tokenizer_path="/scratch/yerong/.cache/huggingface/hub/models--decapoda-research--llama-7b-hf/snapshots/5f98eefcc80e437ef68d457ad7bf167c2c6a1348",
     cross_attn_every_n_layers=4
 )
 
