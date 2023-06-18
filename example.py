@@ -3,7 +3,7 @@ from open_flamingo import create_model_and_transforms
 model, image_processor, tokenizer = create_model_and_transforms(
     clip_vision_encoder_path="ViT-L-14yerong",
     clip_vision_encoder_pretrained="openai",
-    cache_dir='/scratch/yerong/.cache/'
+    cache_dir='/scratch/yerong/.cache/',
     lang_encoder_path="<path to llama weights in HuggingFace format>",
     tokenizer_path="<path to llama tokenizer in HuggingFace format>",
     cross_attn_every_n_layers=4
