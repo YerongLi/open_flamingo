@@ -1,0 +1,16 @@
+torchrun --nnodes=1 --nproc_per_node=4 open_flamingo/train/train.py \
+  --lm_path EleutherAI/gpt-neo-1.3B \
+  --tokenizer_path EleutherAI/gpt-neo-1.3B \
+  --cross_attn_every_n_layers 1 \
+  --dataset_resampled \
+  --batch_size_mmc4 1 \
+  --batch_size_laion 1 \
+  --train_num_samples_mmc4 125000\
+  --train_num_samples_laion 250000 \
+  --loss_multiplier_laion 0.2 \
+  --workers=4 \
+  --run_name OpenFlamingo-3B-vitl-mpt1b \
+  --num_epochs 1 \
+  --warmup_steps  1 \
+  --mmc4_textsim_threshold 0.24 \
+  --report_to_wandb
